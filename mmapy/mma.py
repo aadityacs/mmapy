@@ -1,4 +1,8 @@
-#%% Optimizer
+from __future__ import division
+from scipy.sparse import diags
+from scipy.linalg import solve
+import numpy as np
+
 class MMA:
     # The code was modified from [MMA Svanberg 1987]. Please cite the paper if
     # you end up using this code.
