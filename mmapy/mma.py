@@ -187,7 +187,7 @@ def init_mma(init_design_var: np.ndarray,
       low=mma_params.lower_bound.copy(),
       upp=mma_params.upper_bound.copy(),
       is_converged=False,
-      epoch=1,
+      epoch=0,
       kkt_norm=1000.,
       change_design_var=1000.,
       )
