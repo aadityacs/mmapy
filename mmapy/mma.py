@@ -9,7 +9,7 @@ structural optimization. International journal for numerical methods in
 engineering, 24(2), pp.359-373.
 """
 
-
+from typing import Tuple, Union
 import dataclasses
 from absl import logging
 
@@ -31,10 +31,82 @@ _MMASUB_ASY_INIT = 0.5
 _MMASUB_ASY_INCR = 1.2
 _MMASUB_ASY_DECR = 0.7
 
-_MMA_INIT_DEFAULT_A0 = 1.
-_MMA_INIT_DEFAULT_A = 0.
-_MMA_INIT_DEFAULT_C = 1000.
-_MMA_INIT_DEFAULT_D = 1.
+_MMA_INIT_DEFAULT_A0 = 1.0
+_MMA_INIT_DEFAULT_A = 0.0
+_MMA_INIT_DEFAULT_C = 1000.0
+_MMA_INIT_DEFAULT_D = 1.0
+
+
+@dataclasses.dataclass
+class LagrangeMultipliers:
+  """Lagrange multipliers for the MMA optimization problem.
+
+  The MMA subproblem has the form:
+    Minimize    f_0(x) + a_0*z + sum(c_i*y_i + 0.5*d_i*(y_i)^2)
+    subject to  f_i(x) - a_i*z - y_i <= 0,  i = 1,...,m  (general constraints)
+                alfa_j <= x_j <= beta_j,     j = 1,...,n  (bound constraints)
+                z >= 0,   y_i >= 0,          i = 1,...,m  (non-negativity)
+
+  Attributes:
+    general_constraints: Lagrange multipliers (λ) for the m general inequality
+      constraints f_i(x) - a_i*z - y_i <= 0. Shape: (m, 1)
+      These reflect how much the objective would improve if we relaxed
+      constraint i by one unit. Non-zero when constraint is active (binding).
+
+    lower_bounds: Lagrange multipliers (ξ) for the n lower bound constraints
+      alfa_j - x_j <= 0 (i.e., x_j >= alfa_j). Shape: (n, 1)
+      These are the shadow price of the lower bound on variable j.
+      Non-zero when variable hits its lower bound.
+
+    upper_bounds: Lagrange multipliers (η) for the n upper bound constraints
+      x_j - beta_j <= 0 (i.e., x_j <= beta_j). Shape: (n, 1)
+      These are the shadow price of the upper bound on variable j.
+      Non-zero when variable hits its upper bound.
+
+    slack_nonnegativity: Lagrange multipliers (μ) for the m non-negativity
+      constraints on slack variables -y_i <= 0 (i.e., y_i >= 0). Shape: (m, 1)
+      These are the dual variable for slack variable constraints.
+      Usually related to how much "slack" remains in the general constraints.
+
+    regularization_nonneg: Lagrange multiplier (ζ) for the single non-negativity
+      constraint -z <= 0 (i.e., z >= 0). Scalar. These are the dual variable for the
+      regularization term.
+
+    slack_variables: Slack variables (s) for the m general constraints. Shape: (m, 1)
+      Note: While not technically Lagrange multipliers, slack variables are part
+      of the dual solution and useful for constraint satisfaction analysis.
+      s_i = f_i(x) - a_i*z represents the constraint violation.
+  """
+
+  general_constraints: np.ndarray  # lam: (m, 1)
+  lower_bounds: np.ndarray  # xsi: (n, 1)
+  upper_bounds: np.ndarray  # eta: (n, 1)
+  slack_nonnegativity: np.ndarray  # mu: (m, 1)
+  regularization_nonneg: float  # zet: scalar
+  slack_variables: np.ndarray  # s: (m, 1)
+
+  def to_dict(self):
+    """Convert to dictionary for easier inspection."""
+    return {
+      "general_constraints": self.general_constraints.copy(),
+      "lower_bounds": self.lower_bounds.copy(),
+      "upper_bounds": self.upper_bounds.copy(),
+      "slack_nonnegativity": self.slack_nonnegativity.copy(),
+      "regularization_nonneg": self.regularization_nonneg,
+      "slack_variables": self.slack_variables.copy(),
+    }
+
+  @classmethod
+  def new(cls, num_design_var: int, num_cons: int) -> "LagrangeMultipliers":
+    """Initialize with zeros."""
+    return LagrangeMultipliers(
+      general_constraints=np.zeros((num_cons, 1)),
+      lower_bounds=np.zeros((num_design_var, 1)),
+      upper_bounds=np.zeros((num_design_var, 1)),
+      slack_nonnegativity=np.zeros((num_cons, 1)),
+      regularization_nonneg=0.0,
+      slack_variables=np.zeros((num_cons, 1)),
+    )
 
 
 @dataclasses.dataclass
@@ -67,48 +139,52 @@ class MMAState:
   change_design_var: float
 
   @classmethod
-  def new(cls, num_design_var: int) -> 'MMAState':
+  def new(cls, num_design_var: int) -> "MMAState":
     """Returns an `MMAState` with all-zeros fields, for a new optimization."""
     return MMAState(
-        x=np.zeros((num_design_var, 1)),
-        x_old_1=np.zeros((num_design_var, 1)),
-        x_old_2=np.zeros((num_design_var, 1)),
-        low=np.zeros((num_design_var, 1)),
-        upp=np.ones((num_design_var, 1)),
-        is_converged=False,
-        epoch=0,
-        kkt_norm=1.,
-        change_design_var=1.,
+      x=np.zeros((num_design_var, 1)),
+      x_old_1=np.zeros((num_design_var, 1)),
+      x_old_2=np.zeros((num_design_var, 1)),
+      low=np.zeros((num_design_var, 1)),
+      upp=np.ones((num_design_var, 1)),
+      is_converged=False,
+      epoch=0,
+      kkt_norm=1.0,
+      change_design_var=1.0,
     )
 
   @classmethod
   def from_array(
-      cls,
-      state_array: np.ndarray,
-      num_design_var: int,
-  ) -> 'MMAState':
+    cls,
+    state_array: np.ndarray,
+    num_design_var: int,
+  ) -> "MMAState":
     """Reconstructs an `MMAState` from an array."""
     empty = MMAState.new(num_design_var)
     if empty.to_array().shape != state_array.shape:
       raise ValueError(
-          f'`state_array` shape is incompatible with `num_design_var`, got a '
-          f'shape of {state_array.shape} but expected {empty.to_array().shape}'
-          f'when `num_design_var` is {num_design_var}.')
+        f"`state_array` shape is incompatible with `num_design_var`, got a "
+        f"shape of {state_array.shape} but expected {empty.to_array().shape}"
+        f"when `num_design_var` is {num_design_var}."
+      )
     n = num_design_var
-    return MMAState(x=state_array[0:n].reshape((-1, 1)),
-                    x_old_1=state_array[n:2*n].reshape((-1, 1)),
-                    x_old_2=state_array[2*n:3*n].reshape((-1, 1)),
-                    low=state_array[3*n:4*n].reshape((-1, 1)),
-                    upp=state_array[4*n:5*n].reshape((-1, 1)),
-                    is_converged=bool(state_array[5*n]),
-                    epoch=int(state_array[5*n+1]),
-                    kkt_norm=state_array[5*n+2],
-                    change_design_var=state_array[5*n+3],)
+    return MMAState(
+      x=state_array[0:n].reshape((-1, 1)),
+      x_old_1=state_array[n : 2 * n].reshape((-1, 1)),
+      x_old_2=state_array[2 * n : 3 * n].reshape((-1, 1)),
+      low=state_array[3 * n : 4 * n].reshape((-1, 1)),
+      upp=state_array[4 * n : 5 * n].reshape((-1, 1)),
+      is_converged=bool(state_array[5 * n]),
+      epoch=int(state_array[5 * n + 1]),
+      kkt_norm=state_array[5 * n + 2],
+      change_design_var=state_array[5 * n + 3],
+    )
 
   def to_array(self) -> np.ndarray:
     """Converts the `MMAState` into a rank-1 array."""
     return np.concatenate(
-        [np.array(field).flatten() for field in dataclasses.astuple(self)])
+      [np.array(field).flatten() for field in dataclasses.astuple(self)]
+    )
 
 
 @dataclasses.dataclass
@@ -136,6 +212,7 @@ class MMAParams:
     c: MMA constant
     d: MMA constant
   """
+
   max_iter: float
   kkt_tol: float
   step_tol: float
@@ -146,28 +223,27 @@ class MMAParams:
   upper_bound: np.ndarray
 
   @property
-  def move_limit_step(self)-> np.ndarray:
+  def move_limit_step(self) -> np.ndarray:
     return self.move_limit * abs(self.upper_bound - self.lower_bound)
 
   @property
-  def a0(self)-> float:
+  def a0(self) -> float:
     return _MMA_INIT_DEFAULT_A0
 
   @property
-  def a(self)->np.ndarray:
-    return _MMA_INIT_DEFAULT_A*np.ones((self.num_cons, 1))
+  def a(self) -> np.ndarray:
+    return _MMA_INIT_DEFAULT_A * np.ones((self.num_cons, 1))
 
   @property
-  def c(self)-> np.ndarray:
-    return _MMA_INIT_DEFAULT_C*np.ones((self.num_cons, 1))
+  def c(self) -> np.ndarray:
+    return _MMA_INIT_DEFAULT_C * np.ones((self.num_cons, 1))
 
   @property
-  def d(self)-> np.ndarray:
-    return _MMA_INIT_DEFAULT_D*np.ones((self.num_cons, 1))
+  def d(self) -> np.ndarray:
+    return _MMA_INIT_DEFAULT_D * np.ones((self.num_cons, 1))
 
 
-def init_mma(init_design_var: np.ndarray,
-             mma_params: MMAParams)-> MMAState:
+def init_mma(init_design_var: np.ndarray, mma_params: MMAParams) -> MMAState:
   """Initialize the MMA optimizer.
 
   Args:
@@ -181,21 +257,27 @@ def init_mma(init_design_var: np.ndarray,
   """
 
   return MMAState(
-      x=init_design_var.copy(),
-      x_old_1=init_design_var.copy(),
-      x_old_2=init_design_var.copy(),
-      low=mma_params.lower_bound.copy(),
-      upp=mma_params.upper_bound.copy(),
-      is_converged=False,
-      epoch=0,
-      kkt_norm=1000.,
-      change_design_var=1000.,
-      )
+    x=init_design_var.copy(),
+    x_old_1=init_design_var.copy(),
+    x_old_2=init_design_var.copy(),
+    low=mma_params.lower_bound.copy(),
+    upp=mma_params.upper_bound.copy(),
+    is_converged=False,
+    epoch=0,
+    kkt_norm=1000.0,
+    change_design_var=1000.0,
+  )
 
 
-def update_mma(mma_state: MMAState, mma_params: MMAParams, obj: np.ndarray,
-               grad_obj: np.ndarray, cons: np.ndarray,
-               grad_cons: np.ndarray)-> MMAState:
+def update_mma(
+  mma_state: MMAState,
+  mma_params: MMAParams,
+  obj: np.ndarray,
+  grad_obj: np.ndarray,
+  cons: np.ndarray,
+  grad_cons: np.ndarray,
+  return_lagrange_multipliers: bool = False,
+) -> Union[MMAState, Tuple[MMAState, LagrangeMultipliers]]:
   """Call single step of MMA update.
 
   Args:
@@ -209,7 +291,9 @@ def update_mma(mma_state: MMAState, mma_params: MMAParams, obj: np.ndarray,
     cons: Array of shape (num_cons, 1) that contain the values of the
       constraints.
     grad_cons: Array of shape (num_cons, num_design_var) that contain the
-      gradient of each of the constraints w.r.t each of the design variables
+      gradient of each of the constraints w.r.t each of the design variables.
+    return_lagrange_multipliers: If True, return (mma_state, lagrange_multipliers).
+      If False (default), return only mma_state.
 
   Returns:
     A MMAState dataclass that contains the updated state of the
@@ -218,54 +302,116 @@ def update_mma(mma_state: MMAState, mma_params: MMAParams, obj: np.ndarray,
   mma_state.epoch += 1
   epoch = mma_state.epoch
   # Impose move limits by modifying lower and upper bounds passed to MMA
-  mlb = np.maximum(mma_params.lower_bound,
-                   mma_state.x - mma_params.move_limit_step)
-  mub = np.minimum(mma_params.upper_bound,
-                   mma_state.x + mma_params.move_limit_step)
+  mlb = np.maximum(mma_params.lower_bound, mma_state.x - mma_params.move_limit_step)
+  mub = np.minimum(mma_params.upper_bound, mma_state.x + mma_params.move_limit_step)
 
   # Solve MMA subproblem for current design x
   xmma, ymma, zmma, lam, xsi, eta, mu, zet, s, mma_state.low, mma_state.upp = _mmasub(
-      mma_params.num_cons, mma_params.num_design_var, epoch, mma_state.x, mlb,
-      mub, mma_state.x_old_1, mma_state.x_old_2, obj, grad_obj, cons, grad_cons,
-      mma_state.low, mma_state.upp, mma_params.a0, mma_params.a, mma_params.c,
-      mma_params.d, 0.5)
+    mma_params.num_cons,
+    mma_params.num_design_var,
+    epoch,
+    mma_state.x,
+    mlb,
+    mub,
+    mma_state.x_old_1,
+    mma_state.x_old_2,
+    obj,
+    grad_obj,
+    cons,
+    grad_cons,
+    mma_state.low,
+    mma_state.upp,
+    mma_params.a0,
+    mma_params.a,
+    mma_params.c,
+    mma_params.d,
+    0.5,
+  )
+
+  if return_lagrange_multipliers:
+    lagrange_multipliers = LagrangeMultipliers(
+      general_constraints=lam.copy(),
+      lower_bounds=xsi.copy(),
+      upper_bounds=eta.copy(),
+      slack_nonnegativity=mu.copy(),
+      regularization_nonneg=zet,
+      slack_variables=s.copy(),
+    )
 
   # Updated design vectors of previous and current iterations
-  mma_state.x_old_2, mma_state.x_old_1, mma_state.x = (mma_state.x_old_1,
-                                                       mma_state.x, xmma)
+  mma_state.x_old_2, mma_state.x_old_1, mma_state.x = (
+    mma_state.x_old_1,
+    mma_state.x,
+    xmma,
+  )
 
   # Compute change in design variables
   # Check only after first iteration
   if epoch > 1:
-    mma_state.change_design_var = np.linalg.norm(mma_state.x -
-                                                 mma_state.x_old_1)
+    mma_state.change_design_var = np.linalg.norm(mma_state.x - mma_state.x_old_1)
     if mma_state.change_design_var < mma_params.step_tol:
-      logging.info('Design step convergence tolerance satisfied')
+      logging.info("Design step convergence tolerance satisfied")
       mma_state.is_converged = True
 
   if epoch == mma_params.max_iter:
-    logging.info('Reached maximum number of iterations')
+    logging.info("Reached maximum number of iterations")
     mma_state.is_converged = True
 
   # Compute norm of KKT residual vector
   _, mma_state.kktnorm, _ = _kktcheck(
-      mma_params.num_cons, mma_params.num_design_var,
-      xmma, ymma, zmma, lam, xsi, eta, mu, zet, s, mma_params.lower_bound,
-      mma_params.upper_bound, grad_obj, cons, grad_cons, mma_params.a0,
-      mma_params.a, mma_params.c, mma_params.d)
+    mma_params.num_cons,
+    mma_params.num_design_var,
+    xmma,
+    ymma,
+    zmma,
+    lam,
+    xsi,
+    eta,
+    mu,
+    zet,
+    s,
+    mma_params.lower_bound,
+    mma_params.upper_bound,
+    grad_obj,
+    cons,
+    grad_cons,
+    mma_params.a0,
+    mma_params.a,
+    mma_params.c,
+    mma_params.d,
+  )
 
   if mma_state.kktnorm < mma_params.kkt_tol:
-    logging.info('KKT tolerance satisfied')
+    logging.info("KKT tolerance satisfied")
     mma_state.is_converged = True
 
-  return mma_state
+  if return_lagrange_multipliers:
+    return mma_state, lagrange_multipliers
+  else:
+    return mma_state
 
 
-def _mmasub(m: int, n: int, epoch: int, xval: np.ndarray, xmin: np.ndarray,
-            xmax: np.ndarray, xold1: np.ndarray, xold2: np.ndarray,
-            f0val: np.ndarray, df0dx: np.ndarray, fval: np.ndarray,
-            dfdx: np.ndarray, low: np.ndarray, upp: np.ndarray, a0: float,
-            a: np.ndarray, c: np.ndarray, d: np.ndarray, move: float):
+def _mmasub(
+  m: int,
+  n: int,
+  epoch: int,
+  xval: np.ndarray,
+  xmin: np.ndarray,
+  xmax: np.ndarray,
+  xold1: np.ndarray,
+  xold2: np.ndarray,
+  f0val: np.ndarray,
+  df0dx: np.ndarray,
+  fval: np.ndarray,
+  dfdx: np.ndarray,
+  low: np.ndarray,
+  upp: np.ndarray,
+  a0: float,
+  a: np.ndarray,
+  c: np.ndarray,
+  d: np.ndarray,
+  move: float,
+):
   """Solve the MMA sub problem.
 
   This function mmasub performs one MMA-iteration, aimed at solving the
@@ -388,20 +534,34 @@ def _mmasub(m: int, n: int, epoch: int, xval: np.ndarray, xmin: np.ndarray,
   q_value = q_value + pq_value
   p_value = (scipy.sparse.diags(ux2.flatten(), 0).dot(p_value.T)).T
   q_value = (scipy.sparse.diags(xl2.flatten(), 0).dot(q_value.T)).T
-  b = (np.dot(p_value, uxinv) + np.dot(q_value, xlinv) - fval)
+  b = np.dot(p_value, uxinv) + np.dot(q_value, xlinv) - fval
 
   # Solving the subproblem by a primal-dual Newton method
   xmma, ymma, zmma, lam, xsi, eta, mu, zet, s = _subsolv(
-      m, n, epsimin, low, upp, alfa, beta, p0, q0, p_value, q_value, a0, a, b,
-      c, d)
+    m, n, epsimin, low, upp, alfa, beta, p0, q0, p_value, q_value, a0, a, b, c, d
+  )
   # Return values
   return xmma, ymma, zmma, lam, xsi, eta, mu, zet, s, low, upp
 
 
-def _subsolv(m: int, n: int, epsimin: float, low: np.ndarray, upp: np.ndarray,
-             alfa: np.ndarray, beta: np.ndarray, p0: float, q0: float,
-             p_value: np.ndarray, q_value: np.ndarray, a0: float,
-             a: np.ndarray, b: np.ndarray, c: np.ndarray, d: np.ndarray):
+def _subsolv(
+  m: int,
+  n: int,
+  epsimin: float,
+  low: np.ndarray,
+  upp: np.ndarray,
+  alfa: np.ndarray,
+  beta: np.ndarray,
+  p0: float,
+  q0: float,
+  p_value: np.ndarray,
+  q_value: np.ndarray,
+  a0: float,
+  a: np.ndarray,
+  b: np.ndarray,
+  c: np.ndarray,
+  d: np.ndarray,
+):
   """Solve the MMA or GCMMA sub problem.
 
   This function subsolv solves the MMA subproblem:
@@ -453,8 +613,8 @@ def _subsolv(m: int, n: int, epsimin: float, low: np.ndarray, upp: np.ndarray,
   itera = 0
   # Start while epsi>epsimin
   while epsi > epsimin:
-    epsvecn = epsi*een
-    epsvecm = epsi*eem
+    epsvecn = epsi * een
+    epsvecm = epsi * eem
 
     ux1 = upp - x
     xl1 = x - low
@@ -487,8 +647,9 @@ def _subsolv(m: int, n: int, epsimin: float, low: np.ndarray, upp: np.ndarray,
     ittt = 0
     # Start while (residumax>0.9*epsi) and (ittt<200)
 
-    while ((residumax > _SUBSOLV_EPSI_FACTOR * epsi) and
-           (ittt < _SUBSOLV_MAX_INNER_ITER)):
+    while (residumax > _SUBSOLV_EPSI_FACTOR * epsi) and (
+      ittt < _SUBSOLV_MAX_INNER_ITER
+    ):
       ittt = ittt + 1
       itera = itera + 1
 
@@ -509,7 +670,8 @@ def _subsolv(m: int, n: int, epsimin: float, low: np.ndarray, upp: np.ndarray,
 
       gvec = np.dot(p_value, uxinv1) + np.dot(q_value, xlinv1)
       gg_value = (scipy.sparse.diags(uxinv2.flatten(), 0).dot(p_value.T)).T - (
-          scipy.sparse.diags(xlinv2.flatten(), 0).dot(q_value.T)).T
+        scipy.sparse.diags(xlinv2.flatten(), 0).dot(q_value.T)
+      ).T
       dpsidx = plam / ux2 - qlam / xl2
       delx = dpsidx - epsvecn / (x - alfa) + epsvecn / (beta - x)
       dely = c + d * y - lam - epsvecm / y
@@ -528,23 +690,27 @@ def _subsolv(m: int, n: int, epsimin: float, low: np.ndarray, upp: np.ndarray,
         blam = dellam + dely / diagy - np.dot(gg_value, (delx / diagx))
         bb = np.concatenate((blam, delz), axis=0)
         alam_value = np.asarray(
-            scipy.sparse.diags(diaglamyi.flatten(), 0) +
-            (scipy.sparse.diags(diagxinv.flatten(), 0).dot(gg_value.T).T
-            ).dot(gg_value.T))
+          scipy.sparse.diags(diaglamyi.flatten(), 0)
+          + (scipy.sparse.diags(diagxinv.flatten(), 0).dot(gg_value.T).T).dot(
+            gg_value.T
+          )
+        )
         aar1_value = np.concatenate((alam_value, a), axis=1)
         aar2_value = np.concatenate((a, -zet / z), axis=0).T
         aa_value = np.concatenate((aar1_value, aar2_value), axis=0)
         solut = scipy.linalg.solve(aa_value, bb)
         dlam = solut[0:m]
-        dz = solut[m:m + 1]
+        dz = solut[m : m + 1]
         dx = -delx / diagx - np.dot(gg_value.T, dlam) / diagx
       else:
         diaglamyiinv = eem / diaglamyi
         dellamyi = dellam + dely / diagy
         axx_value = np.asarray(
-            scipy.sparse.diags(diagx.flatten(), 0) +
-            (scipy.sparse.diags(diaglamyiinv.flatten(), 0).dot(gg_value).T
-            ).dot(gg_value))
+          scipy.sparse.diags(diagx.flatten(), 0)
+          + (scipy.sparse.diags(diaglamyiinv.flatten(), 0).dot(gg_value).T).dot(
+            gg_value
+          )
+        )
         azz = zet / z + np.dot(a.T, (a / diaglamyi))
         axz = np.dot(-gg_value.T, (a / diaglamyi))
         bx = delx + np.dot(gg_value.T, (dellamyi / diaglamyi))
@@ -555,9 +721,10 @@ def _subsolv(m: int, n: int, epsimin: float, low: np.ndarray, upp: np.ndarray,
         bb = np.concatenate((-bx, -bz), axis=0)
         solut = scipy.linalg.solve(aa_value, bb)
         dx = solut[0:n]
-        dz = solut[n:n + 1]
-        dlam = np.dot(gg_value, dx) / diaglamyi - dz * (
-            a / diaglamyi) + dellamyi / diaglamyi
+        dz = solut[n : n + 1]
+        dlam = (
+          np.dot(gg_value, dx) / diaglamyi - dz * (a / diaglamyi) + dellamyi / diaglamyi
+        )
         # End if m<n
 
       dy = -dely / diagy + dlam / diagy
@@ -594,7 +761,7 @@ def _subsolv(m: int, n: int, epsimin: float, low: np.ndarray, upp: np.ndarray,
       itto = 0
       resinew = _SUBSOLV_RESIDUE_NORM_FACTOR * residunorm
       # Start: while (resinew>residunorm) and (itto<50)
-      while ((resinew > residunorm) and (itto < _SUBSOLV_MAX_OUTER_ITER)):
+      while (resinew > residunorm) and (itto < _SUBSOLV_MAX_OUTER_ITER):
         itto = itto + 1
         x = xold + steg * dx
         y = yold + steg * dy
@@ -629,8 +796,7 @@ def _subsolv(m: int, n: int, epsimin: float, low: np.ndarray, upp: np.ndarray,
         rezet = np.dot(zet, z) - epsi
         res = lam * s - epsvecm
         residu1 = np.concatenate((rex, rey, rez), axis=0)
-        residu2 = np.concatenate((relam, rexsi, reeta, remu, rezet, res),
-                                 axis=0)
+        residu2 = np.concatenate((relam, rexsi, reeta, remu, rezet, res), axis=0)
         residu = np.concatenate((residu1, residu2), axis=0)
         resinew = np.sqrt(np.dot(residu.T, residu))
         steg = steg / 2
@@ -654,12 +820,28 @@ def _subsolv(m: int, n: int, epsimin: float, low: np.ndarray, upp: np.ndarray,
   return xmma, ymma, zmma, lamma, xsimma, etamma, mumma, zetmma, smma
 
 
-def _kktcheck(m: int, n: int, x: np.ndarray, y: np.ndarray, z: np.ndarray,
-              lam: np.ndarray, xsi: np.ndarray, eta: np.ndarray, mu: np.ndarray,
-              zet: np.ndarray, s: np.ndarray, xmin: np.ndarray,
-              xmax: np.ndarray, df0dx: np.ndarray, fval: np.ndarray,
-              dfdx: np.ndarray, a0: float, a: np.ndarray, c: np.ndarray,
-              d: np.ndarray) -> tuple[np.ndarray, float, float]:
+def _kktcheck(
+  m: int,
+  n: int,
+  x: np.ndarray,
+  y: np.ndarray,
+  z: np.ndarray,
+  lam: np.ndarray,
+  xsi: np.ndarray,
+  eta: np.ndarray,
+  mu: np.ndarray,
+  zet: np.ndarray,
+  s: np.ndarray,
+  xmin: np.ndarray,
+  xmax: np.ndarray,
+  df0dx: np.ndarray,
+  fval: np.ndarray,
+  dfdx: np.ndarray,
+  a0: float,
+  a: np.ndarray,
+  c: np.ndarray,
+  d: np.ndarray,
+) -> tuple[np.ndarray, float, float]:
   """Checks if KKT condition is satisfied.
 
   The left hand sides of the KKT conditions for the following nonlinear
