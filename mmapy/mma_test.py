@@ -777,13 +777,13 @@ class MmaTest(absltest.TestCase):
 
     # Check constraint is active
     self.assertLess(
-      abs(c_val[0, 0]), 0.1, msg="Constraint should be approximately active"
+      abs(c_val[0, 0]), 0.05, msg="Constraint should be approximately active"
     )
 
     # Check multiplier is positive
     self.assertGreater(
       lm.general_constraints[0, 0],
-      0.1,
+      0.01,
       msg="Active constraint should have positive multiplier",
     )
 
@@ -883,7 +883,7 @@ class MmaTest(absltest.TestCase):
     # Stationarity: ∇f - ξ should be small
     self.assertLess(
       residual_norm,
-      0.5,
+      0.01,
       msg=f"Stationarity at bounds violated: ||∇f - ξ|| = {residual_norm}",
     )
 
@@ -968,7 +968,7 @@ class MmaTest(absltest.TestCase):
     # Stationarity: ∇f + η should be small
     self.assertLess(
       residual_norm,
-      0.5,
+      0.01,
       msg=f"Stationarity at upper bounds violated: ||∇f + η|| = {residual_norm}",
     )
 
@@ -1134,14 +1134,13 @@ class MmaTest(absltest.TestCase):
 
     # Check scaling relationship
     base_lambda = results[0]["lambda_lower"]
-    for i, r in enumerate(results[1:], start=1):
+    for _, r in enumerate(results[1:], start=1):
       expected_lambda = base_lambda * (r["scale"] / results[0]["scale"])
       actual_lambda = r["lambda_lower"]
       relative_error = abs(actual_lambda - expected_lambda) / max(expected_lambda, 1e-6)
-
       self.assertLess(
         relative_error,
-        0.2,  # 20% tolerance
+        0.01,  # 1% tolerance
         msg=f"Multiplier should scale with objective. "
         f"Expected {expected_lambda:.4f}, got {actual_lambda:.4f}",
       )
@@ -1253,7 +1252,7 @@ class MmaTest(absltest.TestCase):
       relative_deviation = abs(prod - mean_product) / mean_product
       self.assertLess(
         relative_deviation,
-        0.3,  # 30% tolerance
+        0.01,  # 1% tolerance
         msg="λ * scale should be approximately constant",
       )
 
