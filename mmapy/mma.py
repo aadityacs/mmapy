@@ -9,20 +9,20 @@ structural optimization. International journal for numerical methods in
 engineering, 24(2), pp.359-373.
 """
 
-from typing import Tuple, Union
 import dataclasses
-from absl import logging
+from typing import Tuple, Union
 
 import numpy as np
 import scipy
 import scipy.linalg
 import scipy.sparse
+from absl import logging
 
-_SUBSOLV_EPSI_FACTOR = 0.9
 _SUBSOLV_MAX_INNER_ITER = 200
 _SUBSOLV_RESIDUE_NORM_FACTOR = 2
 _SUBSOLV_MAX_OUTER_ITER = 50
-_SUBSOLV_EPSI_FACTOR = 0.1
+_SUBSOLV_RESIDUAL_TOL_FACTOR = 0.9
+_SUBSOLV_EPSI_REDUCTION = 0.1
 
 _MMASUB_EPSIMIN = 0.0000001
 _MMASUB_RAA0 = 0.00001
@@ -213,7 +213,7 @@ class MMAParams:
     d: MMA constant
   """
 
-  max_iter: float
+  max_iter: int
   kkt_tol: float
   step_tol: float
   move_limit: float
@@ -358,7 +358,7 @@ def update_mma(
     mma_state.is_converged = True
 
   # Compute norm of KKT residual vector
-  _, mma_state.kktnorm, _ = _kktcheck(
+  _, mma_state.kkt_norm, _ = _kktcheck(
     mma_params.num_cons,
     mma_params.num_design_var,
     xmma,
@@ -381,7 +381,7 @@ def update_mma(
     mma_params.d,
   )
 
-  if mma_state.kktnorm < mma_params.kkt_tol:
+  if mma_state.kkt_norm < mma_params.kkt_tol:
     logging.info("KKT tolerance satisfied")
     mma_state.is_converged = True
 
@@ -647,7 +647,7 @@ def _subsolv(
     ittt = 0
     # Start while (residumax>0.9*epsi) and (ittt<200)
 
-    while (residumax > _SUBSOLV_EPSI_FACTOR * epsi) and (
+    while (residumax > _SUBSOLV_RESIDUAL_TOL_FACTOR * epsi) and (
       ittt < _SUBSOLV_MAX_INNER_ITER
     ):
       ittt = ittt + 1
@@ -805,7 +805,7 @@ def _subsolv(
       residumax = max(abs(residu))
       steg = 2 * steg
       # End: while (residumax>0.9*epsi) and (ittt<200)
-    epsi = _SUBSOLV_EPSI_FACTOR * epsi
+    epsi = _SUBSOLV_EPSI_REDUCTION * epsi
     # End: while epsi>epsimin
   xmma = x.copy()
   ymma = y.copy()
